@@ -12,7 +12,7 @@ let package = Package(
   ],
   dependencies: [
     .package(url: "https://github.com/facebook/facebook-ios-sdk", from: "16.3.1"),
-    .package(url: "https://github.com/google/GoogleSignIn-iOS", from: "7.0.0")
+    .package(url: "https://github.com/google/GoogleSignIn-iOS", branch: "main")
   ],
   targets: [
     .target(name: "SocialLogin", dependencies: [

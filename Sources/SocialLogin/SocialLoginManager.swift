@@ -20,7 +20,6 @@ public enum SocialLoginProvider: String, CaseIterable {
 
 public struct SocialProfile {
 
-  public let id: String
   public let name: String?
   public let imageURL: URL?
   public let email: String?
@@ -44,13 +43,21 @@ public enum SocialCredentialResult {
   case unknown
 }
 
+public enum SocialAuhorizationResult {
+
+  case success(String?)
+  case failure(Error)
+  case canceled
+  case unknown
+}
+
 final public class SocialLoginManager: NSObject {
 
   public static let shared = SocialLoginManager()
 
-  private var appleInfo: (authorizationController: ASAuthorizationController, viewController: UIViewController?, completion: (SocialCredentialResult) -> Void)?
+  private var appleController: AuthorizationController!
 
-  var imageDimension: Int = 1024
+  // MARK: Log In
 
   @discardableResult
   public func logIn(with provider: SocialLoginProvider, loadProfile: Bool = true, viewController: UIViewController, completion: @escaping (SocialCredentialResult) -> Void) -> Any {
@@ -67,93 +74,73 @@ final public class SocialLoginManager: NSObject {
   }
 
   @discardableResult
-  public func logInWithApple(viewController: UIViewController, completion: @escaping (SocialCredentialResult) -> Void) -> ASAuthorizationController {
-    weak var viewController = viewController
-
-    let appleIDProvider = ASAuthorizationAppleIDProvider()
-    let request = appleIDProvider.createRequest()
-    request.requestedScopes = [.fullName, .email]
-
-    let authorizationController = ASAuthorizationController(authorizationRequests: [request])
-    appleInfo = (authorizationController, viewController, completion)
-    authorizationController.delegate = self
-    authorizationController.presentationContextProvider = self
-    authorizationController.performRequests()
-    return authorizationController
+  public func logInWithApple(viewController: UIViewController, completion: @escaping (SocialCredentialResult) -> Void) -> NSObjectProtocol {
+    appleController = AuthorizationController(viewController: viewController) { result in
+      switch result {
+      case .success(let authorization):
+        guard let appleIDCredential = authorization.credential as? ASAuthorizationAppleIDCredential else {
+          completion(.unknown)
+          return
+        }
+        let profile = SocialProfile(
+          name: appleIDCredential.fullName.map { PersonNameComponentsFormatter.localizedString(from: $0, style: .long, options: []) },
+          imageURL: nil,
+          email: appleIDCredential.email
+        )
+        let credential = SocialCredential(
+          provider: .apple,
+          userId: appleIDCredential.user,
+          profile: profile,
+          accessToken: nil,
+          identityToken: appleIDCredential.identityToken.flatMap { String(data: $0, encoding: .utf8) },
+          authorizationCode: appleIDCredential.authorizationCode.flatMap { String(data: $0, encoding: .utf8) }
+        )
+        completion(.success(credential))
+      case .failure(let error):
+        if error.code == .canceled {
+          completion(.canceled)
+        } else {
+#if DEBUG
+          print(error)
+#endif
+          completion(.failure(error))
+        }
+      }
+    }
+    appleController.perform()
+    return appleController
   }
 
   @discardableResult
   public func logInWithFacebook(viewController: UIViewController, loadProfile: Bool = true, completion: @escaping (SocialCredentialResult) -> Void) -> LoginManager {
     let loginManager = LoginManager()
-    let configuration = LoginConfiguration(permissions: ["public_profile", "email"], tracking: .enabled)
-    loginManager.logIn(viewController: viewController, configuration: configuration) { [unowned self] result in
+    let configuration = LoginConfiguration(permissions: ["public_profile", "email", "openid"], tracking: .enabled)
+    loginManager.logIn(viewController: viewController, configuration: configuration) { result in
       switch result {
       case .success(_, _, let accessToken):
-        if let accessToken {
-          let userId = accessToken.userID
-          if loadProfile {
-            Profile.loadCurrentProfile { [unowned self] profile, error in
-              guard let result = Result(profile, error) else {
-                let credential = SocialCredential(
-                  provider: .facebook,
-                  userId: userId,
-                  profile: nil,
-                  accessToken: accessToken.tokenString,
-                  identityToken: AuthenticationToken.current?.tokenString,
-                  authorizationCode: nil
-                )
-                completion(.success(credential))
-                return
-              }
-              switch result {
-              case .success(let profile):
-                let imageDimension = CGFloat(imageDimension)
-                let profile = SocialProfile(
-                  id: profile.userID,
-                  name: profile.name,
-                  imageURL: profile.imageURL(forMode: .square, size: CGSize(width: imageDimension, height: imageDimension)),
-                  email: profile.email
-                )
-                let credential = SocialCredential(
-                  provider: .facebook,
-                  userId: userId,
-                  profile: profile,
-                  accessToken: accessToken.tokenString,
-                  identityToken: AuthenticationToken.current?.tokenString,
-                  authorizationCode: nil
-                )
-                completion(.success(credential))
-              case .failure(let error):
-                let error = error as NSError
-#if DEBUG
-                print(error)
-#endif
-                completion(.failure(error))
-              }
-            }
-          } else {
-            let credential = SocialCredential(
-              provider: .facebook,
-              userId: userId,
-              profile: nil,
-              accessToken: accessToken.tokenString,
-              identityToken: AuthenticationToken.current?.tokenString,
-              authorizationCode: nil
+        let credential = SocialCredential(
+          provider: .facebook,
+          userId: accessToken?.userID ?? "UNKNOWN",
+          profile: Profile.current.map { profile in
+            SocialProfile(
+              name: profile.name,
+              imageURL: profile.imageURL,
+              email: profile.email
             )
-            completion(.success(credential))
-          }
-        } else {
-          completion(.unknown)
-        }
+          },
+          accessToken: accessToken?.tokenString,
+          identityToken: AuthenticationToken.current?.tokenString,
+          authorizationCode: nil
+        )
+        completion(.success(credential))
 
       case .cancelled:
         completion(.canceled)
 
       case .failed(let error):
+        let error = error as! LoginError
 #if DEBUG
-        if let error = error as? LoginError {
-          print(error)
-        }
+        print(error)
 #endif
         completion(.failure(error))
       }
@@ -164,7 +151,7 @@ final public class SocialLoginManager: NSObject {
   @discardableResult
   public func logInWithGoogle(viewController: UIViewController, completion: @escaping (SocialCredentialResult) -> Void) -> GIDSignIn {
     let signIn = GIDSignIn.sharedInstance
-    signIn.signIn(withPresenting: viewController, hint: nil) { [unowned self] result, error in
+    signIn.signIn(withPresenting: viewController, hint: nil) { result, error in
       guard let result = Result(result, error) else {
         completion(.unknown)
         return
@@ -172,24 +159,16 @@ final public class SocialLoginManager: NSObject {
       switch result {
       case .success(let result):
         let user = result.user
-        let userId: String
-        if let nonnilUserId = user.userID {
-          userId = nonnilUserId
-        } else {
-#if DEBUG
-          print("GoogleSignIn returned nil `userID`.")
-#endif
-          userId = "UNKNOWN"
-        }
         let credential = SocialCredential(
           provider: .google,
-          userId: userId,
-          profile: SocialProfile(
-            id: userId,
-            name: user.profile?.name,
-            imageURL: user.profile?.imageURL(withDimension: UInt(imageDimension)),
-            email: user.profile?.email
-          ),
+          userId: user.userID ?? "UNKNOWN",
+          profile: user.profile.map { profile in
+            SocialProfile(
+              name: profile.name,
+              imageURL: profile.imageURL(withDimension: 1024),
+              email: profile.email
+            )
+          },
           accessToken: result.user.accessToken.tokenString,
           identityToken: result.user.idToken?.tokenString,
           authorizationCode: result.serverAuthCode
@@ -197,101 +176,107 @@ final public class SocialLoginManager: NSObject {
         completion(.success(credential))
 
       case .failure(let error):
-        if let error = error as? GIDSignInError {
-          if error.code == .canceled {
-            completion(.canceled)
-          } else {
-#if DEBUG
-            print(error)
-#endif
-            completion(.failure(error))
-          }
+        let error = error as! GIDSignInError
+        if error.code == .canceled {
+          completion(.canceled)
         } else {
+#if DEBUG
+          print(error)
+#endif
           completion(.failure(error))
         }
       }
     }
     return signIn
   }
-}
 
-extension SocialLoginManager: ASAuthorizationControllerDelegate {
+  // MARK: Authorization Code
 
-  public func authorizationController(controller: ASAuthorizationController, didCompleteWithAuthorization authorization: ASAuthorization) {
-    guard let appleInfo, appleInfo.authorizationController === controller else { return }
-
-    let result: SocialCredentialResult
-    if let appleIDCredential = authorization.credential as? ASAuthorizationAppleIDCredential {
-      let userId = appleIDCredential.user
-      let profile = SocialProfile(
-        id: userId,
-        name: appleIDCredential.fullName.map { PersonNameComponentsFormatter.localizedString(from: $0, style: .long, options: []) },
-        imageURL: nil,
-        email: appleIDCredential.email
-      )
-      let credential = SocialCredential(
-        provider: .apple,
-        userId: userId,
-        profile: profile,
-        accessToken: nil,
-        identityToken: appleIDCredential.identityToken.flatMap { String(data: $0, encoding: .utf8) },
-        authorizationCode: appleIDCredential.authorizationCode.flatMap { String(data: $0, encoding: .utf8) }
-      )
-      result = .success(credential)
-    } else {
-      result = .unknown
+  @discardableResult
+  public func authorize(with provider: SocialLoginProvider, viewController: UIViewController, completion: @escaping (SocialAuhorizationResult) -> Void) -> NSObjectProtocol {
+    switch provider {
+    case .apple:
+      return authorizeWithApple(viewController: viewController, completion: completion)
+    case .facebook:
+      return authorizeWithFacebook(viewController: viewController, completion: completion)
+    case .google:
+      return authorizeWithGoogle(viewController: viewController, completion: completion)
     }
-    appleInfo.completion(result)
-    self.appleInfo = nil
   }
 
-  public func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
-    guard let appleInfo, appleInfo.authorizationController === controller else { return }
+  @discardableResult
+  public func authorizeWithApple(viewController: UIViewController, completion: @escaping (SocialAuhorizationResult) -> Void) -> AuthorizationController {
+    appleController = AuthorizationController(viewController: viewController) { result in
+      switch result {
+      case .success(let authorization):
+        guard let appleIDCredential = authorization.credential as? ASAuthorizationAppleIDCredential else {
+          completion(.unknown)
+          return
+        }
+        completion(.success(appleIDCredential.authorizationCode.flatMap { String(data: $0, encoding: .utf8) }))
 
-    var result: SocialCredentialResult?
-    if let error = error as? ASAuthorizationError {
-      if error.code == .canceled {
-        result = .canceled
-      } else {
+      case .failure(let error):
+        if error.code == .canceled {
+          completion(.canceled)
+        } else {
 #if DEBUG
-        print(error)
+          print(error)
 #endif
+          completion(.failure(error))
+        }
       }
     }
-    appleInfo.completion(result ?? .failure(error))
-    self.appleInfo = nil
-  }
-}
-
-extension SocialLoginManager: ASAuthorizationControllerPresentationContextProviding {
-
-  private func defaultWindow() -> UIWindow {
-    // https://stackoverflow.com/a/57899013/11235826
-    return UIApplication.shared.windows.first(where: \.isKeyWindow) ?? UIWindow()
+    appleController.perform()
+    return appleController
   }
 
-  public func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
-    guard let appleInfo, appleInfo.authorizationController === controller else { return defaultWindow() }
+  @discardableResult
+  public func authorizeWithFacebook(viewController: UIViewController, completion: @escaping (SocialAuhorizationResult) -> Void) -> FBAuthenticationManager {
+    let authenticationManager = FBAuthenticationManager.shared
+    authenticationManager.logIn(viewController: viewController) { result in
+      switch result {
+      case .success(let authorizationCode):
+        completion(.success(authorizationCode))
 
-    if let viewController = appleInfo.viewController, viewController.isViewLoaded {
-      if let window = viewController.view.window {
-        return window
+      case .failure(let error):
+        if error.code == .canceledLogin {
+          completion(.canceled)
+        } else {
+#if DEBUG
+          print(error)
+#endif
+          completion(.failure(error))
+        }
       }
     }
-    return defaultWindow()
+    return authenticationManager
   }
-}
 
-extension Result {
+  @discardableResult
+  public func authorizeWithGoogle(viewController: UIViewController, completion: @escaping (SocialAuhorizationResult) -> Void) -> GIDSignIn {
+    let signIn = GIDSignIn.sharedInstance
+    signIn.signIn(withPresenting: viewController, hint: nil) {result, error in
+      guard let result = Result(result, error) else {
+        completion(.unknown)
+        return
+      }
+      switch result {
+      case .success(let result):
+        completion(.success(result.serverAuthCode))
 
-  init?(_ success: Success?, _ failure: Failure?) {
-    if let success {
-      self = .success(success)
-    } else if let failure {
-      self = .failure(failure)
-    } else {
-      return nil
+      case .failure(let error):
+        let error = error as! GIDSignInError
+        if error.code == .canceled {
+          completion(.canceled)
+        } else {
+#if DEBUG
+          print(error)
+#endif
+          completion(.failure(error))
+        }
+      }
     }
+    return signIn
   }
 }
 

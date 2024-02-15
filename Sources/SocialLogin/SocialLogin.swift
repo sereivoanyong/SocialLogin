@@ -21,8 +21,10 @@ public enum SocialLogin {
   // MARK: UISceneDelegate
 
   public static func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
-    if let userActivity = options.userActivities.first {
-      ApplicationDelegate.shared.application(.shared, continue: userActivity)
+    if !FBAuthenticationManager.shared.hasPendingLogin {
+      if let userActivity = options.userActivities.first {
+        ApplicationDelegate.shared.application(.shared, continue: userActivity)
+      }
     }
   }
 
@@ -35,7 +37,9 @@ public enum SocialLogin {
   }
 
   public static func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
-    ApplicationDelegate.shared.application(.shared, continue: userActivity)
+    if !FBAuthenticationManager.shared.hasPendingLogin {
+      ApplicationDelegate.shared.application(.shared, continue: userActivity)
+    }
   }
 }
 
@@ -44,8 +48,14 @@ extension SocialLogin {
   public static func `open`(_ urlContext: UIOpenURLContext) -> Bool {
     let url = urlContext.url
     let options = urlContext.options
-    if ApplicationDelegate.shared.application(.shared, open: url, sourceApplication: options.sourceApplication, annotation: options.annotation) {
-      return true
+    if !FBAuthenticationManager.shared.hasPendingLogin {
+      if ApplicationDelegate.shared.application(.shared, open: url, sourceApplication: options.sourceApplication, annotation: options.annotation) {
+        return true
+      }
+    } else {
+      if FBAuthenticationManager.shared.open(url) {
+        return true
+      }
     }
     if GIDSignIn.sharedInstance.handle(url) {
       return true
